@@ -1,0 +1,174 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath, amssymb}
+\usepackage{booktabs}
+\usepackage{listings}
+
+\title{EE/CS 148B HW2}
+\author{Yash Kakade}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\section{Problem 2.3 -- Simple Profiling}
+
+\subsection*{Part 1}
+
+\begin{lstlisting}[language=Python]
+# code here
+\end{lstlisting}
+
+\subsection*{Part 2}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcc}
+\toprule
+Model & Forward Time & Backward Time \\
+\midrule
+Small & $0.3421 \pm 0.0345$ s & $1.7290 \pm 0.0244$ s \\
+Medium & $1.3798 \pm 0.5713$ s & $2.0685 \pm 0.0454$ s \\
+Large & $2.9783 \pm 0.0599$ s & $7.0291 \pm 0.1196$ s \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+With 5 warmup steps, forward passes took $0.3421 \pm 0.0345$ s, $1.3798 \pm 0.5713$ s, and $2.9783 \pm 0.0599$ s for the small, medium, and large models, while backward passes took $1.7290 \pm 0.0244$ s, $2.0685 \pm 0.0454$ s, and $7.0291 \pm 0.1196$ s. Backward passes took longer because they compute gradients through the computation graph; most standard deviations were small relative to the mean, though the medium forward timing showed higher variability.
+
+\subsection*{Part 3}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{llcc}
+\toprule
+Warmup Steps & Model & Forward Time & Backward Time \\
+\midrule
+0 & Small & $0.3919 \pm 0.1448$ s & $0.7164 \pm 0.0262$ s \\
+0 & Medium & $0.9452 \pm 0.1299$ s & $2.0262 \pm 0.0413$ s \\
+0 & Large & $3.0873 \pm 0.1504$ s & $6.8241 \pm 0.0947$ s \\
+1 & Small & $0.8019 \pm 0.0149$ s & $1.6784 \pm 0.0327$ s \\
+1 & Medium & $1.2190 \pm 0.1980$ s & $4.6955 \pm 0.3864$ s \\
+1 & Large & $7.3462 \pm 0.2021$ s & $15.8415 \pm 0.7451$ s \\
+2 & Small & $0.7809 \pm 0.0327$ s & $1.6364 \pm 0.0954$ s \\
+2 & Medium & $2.1242 \pm 0.0188$ s & $2.4386 \pm 0.7010$ s \\
+2 & Large & $3.2859 \pm 0.1609$ s & $8.7790 \pm 3.3968$ s \\
+10 & Small & $0.3430 \pm 0.0200$ s & $0.7427 \pm 0.0281$ s \\
+10 & Medium & $1.4703 \pm 0.5285$ s & $2.3188 \pm 0.0888$ s \\
+10 & Large & $3.2096 \pm 0.1037$ s & $4.8267 \pm 0.0693$ s \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Without warmup, some timings changed noticeably compared with the 5-step baseline, and the 1--2 warmup-step runs were still inconsistent: for example, the large backward pass was $6.8241 \pm 0.0947$ s with 0 warmup steps, $15.8415 \pm 0.7451$ s with 1 warmup step, $8.7790 \pm 3.3968$ s with 2 warmup steps, and $4.8267 \pm 0.0693$ s with 10 warmup steps. This happens because CUDA kernel initialization, memory allocation, caching, autotuning, and GPU clock behavior can still be settling during the first few iterations. Using 10 warmup steps generally produced more stable measurements, although run-to-run noise was still visible in some forward timings.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\section{Problem 2.4 -- Nsight Profiling}
+
+\subsection*{Part 1}
+
+For the small model at context length 128, the measured forward-pass NVTX range took 26.3 ms in Nsight Systems, which is in the same order as the Python timing but lower because this profile measured one steady-state step after warmup rather than averaging a longer run. The forward pass was dominated by the cuBLAS GEMM kernel \texttt{ampere\_sgemm\_128x64\_tn}, which took 81.818 ms cumulatively across the profile and was invoked 342 times total, or about 57 times per forward pass over the 6 profiled forward passes.
+
+Besides matrix multiplication, nontrivial CUDA runtime came from elementwise multiply/add/copy kernels, sigmoid, attention masking via \texttt{where}, and softmax-related max, exp, divide, and sum-reduction kernels. When profiling both forward and backward, the same \texttt{ampere\_sgemm\_128x64\_tn} kernel remained the largest single cumulative kernel at 76.000 ms, but backward also introduced large GEMM kernels such as \texttt{ampere\_sgemm\_128x64\_nn} at 63.176 ms and \texttt{ampere\_sgemm\_128x64\_nt} at 58.041 ms, along with more elementwise and reduction work.
+
+For a full AdamW training step, the measured NVTX range was 134.6 ms, with 44.9 ms in the measured forward pass, 50.3 ms in backward, and 46.6 ms in the optimizer step. Compared with inference, the fraction of time spent outside matrix multiplication increased because backward and AdamW add many elementwise update, copy, memset, and reduction kernels in addition to the GEMMs.
+
+Within self-attention, the annotated ranges showed that softmax took 22.593 ms total, attention-score matmul took 12.558 ms, and the final attention matmul took 5.865 ms across the profile. Thus softmax took more runtime than the final attention matmul despite having far fewer FLOPs, which suggests it is more memory-bandwidth and kernel-launch limited than the highly optimized cuBLAS matrix multiplications.
+
+% insert profiler screenshot here
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\section{Problem 2.5 -- Mixed Precision}
+
+\subsection*{Part 1}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lc}
+\toprule
+Component & Datatype \\
+\midrule
+Parameters &  \\
+Layer Output &  \\
+Loss &  \\
+Gradients &  \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection*{Part 2}
+
+Response here.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\section{Problem 2.6 -- Memory Profiling}
+
+\subsection*{Part 1}
+
+% insert memory timeline image here
+
+Response here.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\section{Problem 2.7 -- Attention Profiling}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{cccc}
+\toprule
+$d_{model}$ & Seq Length & Forward & Backward \\
+\midrule
+ &  &  &  \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Response here.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\section{Problem 2.8 -- Torch Compile}
+
+\subsection*{Part 1}
+
+Response here.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\section{Problem 3.1 -- GSM8K Baseline}
+
+\begin{lstlisting}[language=Python]
+# code here
+\end{lstlisting}
+
+Response here.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\section{Problem 3.2 -- Prompting Baselines}
+
+\subsection*{Chain of Thought}
+
+Response here.
+
+\subsection*{Self Consistency}
+
+Response here.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\section{Problem 3.5 -- GRPO}
+
+\subsection*{Training Results}
+
+% insert training curve here
+
+Response here.
+
+\end{document}
