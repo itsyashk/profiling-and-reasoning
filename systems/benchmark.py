@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
 import statistics
 import timeit
 from contextlib import contextmanager, nullcontext
@@ -200,6 +201,7 @@ def benchmark_model(config: BenchmarkConfig) -> dict[str, float]:
     optimizer = AdamW(model.parameters(), lr=1e-3) if config.mode == "train-step" else None
     batch = make_random_batch(config, device)
     autocast_context = make_autocast_context(config.use_bf16)
+    snapshot_path = make_memory_snapshot_path(config)
 
     with nvtx_range("warmup"):
         for step in range(config.warmup_steps):
@@ -209,24 +211,31 @@ def benchmark_model(config: BenchmarkConfig) -> dict[str, float]:
                 else:
                     run_single_step(model, batch, config.mode, autocast_context, optimizer)
 
+    maybe_start_memory_history(config.use_memory_profiler)
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+
     step_times = []
-    with nvtx_range("measurement"):
-        for step in range(config.measure_steps):
-            with nvtx_range(f"measurement step {step}"):
-                if config.mode == "backward":
-                    model.zero_grad(set_to_none=True)
-                    loss = make_loss(model, batch, autocast_context)
-                    if batch.is_cuda:
-                        torch.cuda.synchronize(batch.device)
-                    start = timeit.default_timer()
-                    with nvtx_range("timed backward pass"):
-                        loss.backward()
-                    if batch.is_cuda:
-                        torch.cuda.synchronize(batch.device)
-                else:
-                    start = timeit.default_timer()
-                    run_single_step(model, batch, config.mode, autocast_context, optimizer)
-                step_times.append(timeit.default_timer() - start)
+    try:
+        with nvtx_range("measurement"):
+            for step in range(config.measure_steps):
+                with nvtx_range(f"measurement step {step}"):
+                    if config.mode == "backward":
+                        model.zero_grad(set_to_none=True)
+                        loss = make_loss(model, batch, autocast_context)
+                        if batch.is_cuda:
+                            torch.cuda.synchronize(batch.device)
+                        start = timeit.default_timer()
+                        with nvtx_range("timed backward pass"):
+                            loss.backward()
+                        if batch.is_cuda:
+                            torch.cuda.synchronize(batch.device)
+                    else:
+                        start = timeit.default_timer()
+                        run_single_step(model, batch, config.mode, autocast_context, optimizer)
+                    step_times.append(timeit.default_timer() - start)
+    finally:
+        maybe_dump_memory_snapshot(config.use_memory_profiler, snapshot_path)
 
     total_time_seconds = sum(step_times)
     average_step_time_seconds = statistics.fmean(step_times)
@@ -237,6 +246,11 @@ def benchmark_model(config: BenchmarkConfig) -> dict[str, float]:
         "std_step_time_seconds": std_step_time_seconds,
         "steps_per_second": 1.0 / average_step_time_seconds,
     }
+    if device.type == "cuda":
+        results["peak_memory_allocated_mb"] = torch.cuda.max_memory_allocated(device) / 1024**2
+        results["peak_memory_reserved_mb"] = torch.cuda.max_memory_reserved(device) / 1024**2
+    if config.use_memory_profiler:
+        results["memory_snapshot_path"] = str(snapshot_path)
     print(results)
     return results
 
@@ -265,13 +279,31 @@ def annotated_scaled_dot_product_attention(
 
 
 def maybe_start_memory_history(enabled: bool) -> None:
-    if enabled:
-        raise NotImplementedError
+    if not enabled:
+        return
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA memory profiling requires a CUDA device.")
+
+    torch.cuda.memory._record_memory_history(max_entries=1_000_000)
 
 
 def maybe_dump_memory_snapshot(enabled: bool, output_path: Path) -> None:
-    if enabled:
-        raise NotImplementedError
+    if not enabled:
+        return
+    try:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.cuda.memory._dump_snapshot(str(output_path))
+    finally:
+        torch.cuda.memory._record_memory_history(enabled=None)
+
+
+def make_memory_snapshot_path(config: BenchmarkConfig) -> Path:
+    precision = "bf16" if config.use_bf16 else "fp32"
+    filename = (
+        f"memory_{config.model_size}_ctx{config.context_length}_"
+        f"bs{config.batch_size}_{config.mode}_{precision}_pid{os.getpid()}.pickle"
+    )
+    return config.output_dir / "memory" / filename
 
 
 def make_autocast_context(use_bf16: bool):

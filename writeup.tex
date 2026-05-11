@@ -3,6 +3,7 @@
 \usepackage[margin=1in]{geometry}
 \usepackage{amsmath, amssymb}
 \usepackage{booktabs}
+\usepackage{graphicx}
 \usepackage{listings}
 
 \title{EE/CS 148B HW2}
@@ -110,9 +111,67 @@ Response here.
 
 \subsection*{Part 1}
 
-% insert memory timeline image here
+\begin{figure}[h]
+\centering
+\includegraphics[width=\textwidth]{artifacts/memory/memory_large_ctx128_bs4_forward_fp32_pid5504.png}
+\caption{Active memory timeline for a forward-only pass of the large model at context length 128.}
+\end{figure}
 
-Response here.
+\begin{figure}[h]
+\centering
+\includegraphics[width=\textwidth]{artifacts/memory/memory_large_ctx128_bs4_train-step_fp32_pid25756.png}
+\caption{Active memory timeline for a full training step of the large model at context length 128.}
+\end{figure}
+
+I added a \texttt{--use-memory-profiler} option to the benchmark script that starts
+\texttt{torch.cuda.memory.\_record\_memory\_history} after warmup, profiles only the
+measured step, dumps a snapshot under \texttt{artifacts/memory/}, and prints the
+peak allocated and reserved CUDA memory. In the forward-only timeline, active
+memory stays nearly flat around the model-weight baseline, with only small
+transient allocations for activations and logits during the forward pass. In the
+full training-step timeline, memory first ramps up during the forward pass as
+activations are saved, drops through backward as those saved tensors are freed,
+and then rises again during the optimizer step as gradients and Adam optimizer
+state are materialized, producing a much larger peak around $6.5$ GiB.
+
+\subsection*{Part 2}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{ccc}
+\toprule
+Context Length & Forward Peak Memory & Training-Step Peak Memory \\
+\midrule
+128 & 1656.4 MiB & 6701.1 MiB \\
+256 & 1708.5 MiB & 6721.1 MiB \\
+512 & 1920.8 MiB & 10814.3 MiB \\
+1024 & 2729.9 MiB & OOM \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The forward-pass peak grows gradually with context length because the large
+model's FP32 parameters are the dominant fixed cost, while activations and logits
+scale with sequence length. The training-step peak is much larger because it
+includes saved activations, gradients, and Adam optimizer state in addition to
+the parameters; on my GPU, the context-length 1024 training step ran out of
+memory while materializing the attention scores.
+
+\subsection*{Part 3}
+
+At context length 128, BF16 autocast gave a forward-pass peak of 2425.1 MiB and
+a training-step peak of 6690.8 MiB, compared with 1656.4 MiB and 6701.1 MiB in
+FP32. Thus mixed precision did not significantly reduce total memory in this
+benchmark: the training-step peak was essentially unchanged because parameters,
+gradients, and Adam state dominate, and the forward pass actually used more
+memory due to autocast overhead/cached converted tensors on this run.
+
+\subsection*{Part 4}
+
+For the large model at the reference hyperparameters, a residual-stream activation
+tensor has shape $4 \times 128 \times 1024$. In single precision this is
+$4 \cdot 128 \cdot 1024 \cdot 4 = 2{,}097{,}152$ bytes, or exactly $2.0$ MiB
+after dividing by $1024^2$.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
