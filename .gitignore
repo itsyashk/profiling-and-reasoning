@@ -1,2 +1,17 @@
 #hw2.pdf
 RULES.md
+CLAUDE.md
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Colab output
+colab_results.zip
+artifacts/colab_results/
+
+# HuggingFace model cache
+*.bin
+*.safetensors
+*.msgpack

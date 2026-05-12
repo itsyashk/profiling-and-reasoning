@@ -196,7 +196,8 @@ def benchmark_model(config: BenchmarkConfig) -> dict[str, float]:
     model = build_model(config).to(device)
     model.train(config.mode in {"backward", "forward-backward", "train-step"})
     if config.compile_model:
-        model = torch.compile(model)
+        # Triton (inductor default) is Linux-only; use aot_eager on Windows
+        model = torch.compile(model, backend="aot_eager")
 
     optimizer = AdamW(model.parameters(), lr=1e-3) if config.mode == "train-step" else None
     batch = make_random_batch(config, device)
