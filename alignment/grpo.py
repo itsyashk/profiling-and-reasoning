@@ -198,12 +198,17 @@ def train_grpo(
     micro_batch_size = train_batch_size // gradient_accumulation_steps
     n_microbatches = rollout_batch_size // micro_batch_size
 
-    from .eval import build_prompts
+    from .eval import _extract_ground_truth, build_prompts
 
     val_prompts = build_prompts(val_examples[:val_size], prompt_template)
-    val_ground_truths = [ex["answer"] for ex in val_examples[:val_size]]
+    val_ground_truths = _extract_ground_truth(val_examples[:val_size])
 
-    history: dict[str, list] = {"step": [], "val_reward": [], "train_reward": []}
+    history: dict[str, list] = {
+        "step": [],
+        "val_reward": [],
+        "train_reward": [],
+        "val_generations": [],
+    }
 
     stop_strings = ["</answer>"]
 
@@ -233,16 +238,22 @@ def train_grpo(
         policy_model.train()
         return responses
 
-    def evaluate(prompts: list[str], ground_truths: list[str]) -> float:
+    def evaluate(prompts: list[str], ground_truths: list[str]) -> tuple[float, list[dict[str, Any]]]:
         responses = generate_responses(prompts)
-        rewards = [reward_fn(r, gt)["reward"] for r, gt in zip(responses, ground_truths)]
-        return sum(rewards) / len(rewards)
+        reward_infos = [reward_fn(r, gt) for r, gt in zip(responses, ground_truths)]
+        rewards = [info["reward"] for info in reward_infos]
+        return sum(rewards) / len(rewards), log_generations(
+            prompts[:3],
+            responses[:3],
+            ground_truths[:3],
+            reward_infos[:3],
+        )
 
     for step in range(1, n_grpo_steps + 1):
         # Sample a batch of questions
         batch_examples = random.sample(train_examples, n_prompts_per_rollout)
         batch_prompts = build_prompts(batch_examples, prompt_template)
-        batch_ground_truths = [ex["answer"] for ex in batch_examples]
+        batch_ground_truths = _extract_ground_truth(batch_examples)
 
         # Repeat each prompt group_size times
         repeated_prompts = [p for p in batch_prompts for _ in range(group_size)]
@@ -268,10 +279,17 @@ def train_grpo(
         response_mask = tokenized["response_mask"].to(device)
         advantages_dev = advantages.to(device)
 
-        # Compute old log probs (no grad)
+        # Compute old log probs in microbatches to avoid OOM on large vocab/long seqs
+        old_log_probs_chunks = []
         with torch.no_grad():
-            old_out = get_response_log_probs(policy_model, input_ids, labels, return_token_entropy=False)
-            old_log_probs = old_out["log_probs"].detach()
+            for i in range(0, len(input_ids), micro_batch_size):
+                chunk_out = get_response_log_probs(
+                    policy_model,
+                    input_ids[i : i + micro_batch_size],
+                    labels[i : i + micro_batch_size],
+                )
+                old_log_probs_chunks.append(chunk_out["log_probs"].detach())
+        old_log_probs = torch.cat(old_log_probs_chunks, dim=0)
 
         # Training epochs on this rollout batch
         for _epoch in range(epochs_per_rollout_batch):
@@ -310,8 +328,9 @@ def train_grpo(
             print(f"Step {step}: train_reward={train_reward:.3f} loss={total_loss:.4f} grad_norm={grad_norm:.3f}")
 
         if step % val_every == 0:
-            val_reward = evaluate(val_prompts, val_ground_truths)
+            val_reward, val_generations = evaluate(val_prompts, val_ground_truths)
             history["val_reward"].append(val_reward)
+            history["val_generations"].append({"step": step, "examples": val_generations})
             print(f"Step {step}: val_reward={val_reward:.3f}")
             if wandb_run is not None:
                 wandb_run.log({"val_reward": val_reward, "train_reward": train_reward, "step": step})
