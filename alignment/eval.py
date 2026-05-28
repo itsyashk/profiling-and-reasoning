@@ -114,33 +114,42 @@ def _generate_with_transformers(
     temperature: float = 1.0,
     num_return_sequences: int = 1,
     device: str = "cuda",
+    batch_size: int = 16,
 ) -> list[list[str]]:
     import torch
     stop = "</answer>"
     model.eval()
     all_responses: list[list[str]] = []
+    do_sample = num_return_sequences > 1 or temperature != 1.0
+    old_padding_side = tokenizer.padding_side
+    tokenizer.padding_side = "left"
 
-    with torch.no_grad():
-        for prompt in prompts:
-            inputs = tokenizer(prompt, return_tensors="pt").to(device)
-            input_len = inputs["input_ids"].shape[1]
-            do_sample = num_return_sequences > 1 or temperature != 1.0
-            outputs = model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                do_sample=do_sample,
-                temperature=temperature if do_sample else None,
-                num_return_sequences=num_return_sequences,
-                pad_token_id=tokenizer.pad_token_id,
-                eos_token_id=tokenizer.eos_token_id,
-            )
-            responses = []
-            for seq in outputs:
-                text = tokenizer.decode(seq[input_len:], skip_special_tokens=False)
-                if stop in text:
-                    text = text[: text.index(stop) + len(stop)]
-                responses.append(text)
-            all_responses.append(responses)
+    try:
+        with torch.no_grad():
+            for start in range(0, len(prompts), batch_size):
+                batch_prompts = prompts[start : start + batch_size]
+                inputs = tokenizer(batch_prompts, return_tensors="pt", padding=True).to(device)
+                input_len = inputs["input_ids"].shape[1]
+                outputs = model.generate(
+                    **inputs,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=do_sample,
+                    temperature=temperature if do_sample else None,
+                    num_return_sequences=num_return_sequences,
+                    pad_token_id=tokenizer.pad_token_id,
+                    eos_token_id=tokenizer.eos_token_id,
+                    use_cache=True,
+                )
+                decoded = []
+                for seq in outputs[:, input_len:]:
+                    text = tokenizer.decode(seq, skip_special_tokens=False)
+                    if stop in text:
+                        text = text[: text.index(stop) + len(stop)]
+                    decoded.append(text)
+                for i in range(0, len(decoded), num_return_sequences):
+                    all_responses.append(decoded[i : i + num_return_sequences])
+    finally:
+        tokenizer.padding_side = old_padding_side
 
     return all_responses
 

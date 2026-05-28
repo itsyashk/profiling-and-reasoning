@@ -221,21 +221,27 @@ def train_grpo(
         eos_token_id=tokenizer.eos_token_id,
     )
 
-    def generate_responses(prompts: list[str]) -> list[str]:
+    def generate_responses(prompts: list[str], batch_size: int = 16) -> list[str]:
         policy_model.eval()
         responses = []
-        with torch.no_grad():
-            for prompt in prompts:
-                inputs = tokenizer(prompt, return_tensors="pt").to(device)
-                output_ids = policy_model.generate(**inputs, generation_config=gen_config)
-                new_ids = output_ids[0, inputs["input_ids"].shape[1]:]
-                text = tokenizer.decode(new_ids, skip_special_tokens=False)
-                # trim at stop string
-                for stop in stop_strings:
-                    if stop in text:
-                        text = text[: text.index(stop) + len(stop)]
-                responses.append(text)
-        policy_model.train()
+        old_padding_side = tokenizer.padding_side
+        tokenizer.padding_side = "left"
+        try:
+            with torch.no_grad():
+                for start in range(0, len(prompts), batch_size):
+                    batch_prompts = prompts[start : start + batch_size]
+                    inputs = tokenizer(batch_prompts, return_tensors="pt", padding=True).to(device)
+                    prompt_len = inputs["input_ids"].shape[1]
+                    output_ids = policy_model.generate(**inputs, generation_config=gen_config)
+                    for seq in output_ids[:, prompt_len:]:
+                        text = tokenizer.decode(seq, skip_special_tokens=False)
+                        for stop in stop_strings:
+                            if stop in text:
+                                text = text[: text.index(stop) + len(stop)]
+                        responses.append(text)
+        finally:
+            tokenizer.padding_side = old_padding_side
+            policy_model.train()
         return responses
 
     def evaluate(prompts: list[str], ground_truths: list[str]) -> tuple[float, list[dict[str, Any]]]:

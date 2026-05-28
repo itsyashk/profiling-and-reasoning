@@ -268,7 +268,7 @@ Everything got slower. Without Triton (Linux-only), \texttt{aot\_eager} can't fu
 
 \begin{table}[h]
 \centering
-\begin{tabular}{lccccc}
+\begin{tabular}{lcccccc}
 \toprule
 Model & Vanilla Fwd (s) & Compiled Fwd (s) & Fwd $\Delta$ & Vanilla Train (s) & Compiled Train (s) & Train $\Delta$ \\
 \midrule
@@ -287,10 +287,31 @@ Forward-only is 2--4$\times$ slower for the same reason as Part 1. The training 
 \section{Problem 3.1 -- GSM8K Baseline}
 
 \begin{lstlisting}[language=Python]
-# code here
+from pathlib import Path
+from alignment.eval import run_direct_baseline
+
+run_direct_baseline(Path("artifacts/colab_results/direct_baseline.json"))
 \end{lstlisting}
 
-Response here.
+The direct-prediction evaluation script is implemented in \texttt{alignment/eval.py}. It loads the GSM8K split, formats each example with the direct \texttt{<answer>} prompt, generates completions from \texttt{Qwen/Qwen2.5-Math-1.5B}, scores them with the tag-based GSM8K reward, and serializes prompts, responses, ground truths, and rewards to disk.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcc}
+\toprule
+Category & Count & Fraction \\
+\midrule
+Format reward 1, answer reward 1 & 274 & 20.8\% \\
+Format reward 1, answer reward 0 & 812 & 61.6\% \\
+Format reward 0, answer reward 0 & 233 & 17.7\% \\
+\bottomrule
+\end{tabular}
+\caption{Direct-prompting reward categories on the 1319-example GSM8K test set.}
+\end{table}
+
+Most format failures came from the base model ignoring the requested answer-only format: it often wrote an explanation, emitted a boxed answer, or ended without the closing \texttt{</answer>} tag. In these cases the issue is mostly the base model's instruction following rather than the parser, because the final numeric answer is sometimes present but not inside the exact tags. When the format reward was 1 but the answer reward was 0, the parser usually behaved correctly: examples included arithmetic slips, wrong unit conversions, and answers that matched an intermediate quantity rather than the final requested value.
+
+The direct zero-shot baseline achieved a mean format reward of 0.823 and a mean answer reward of 0.208. This is a weak baseline for a math-specialized model, mainly because the direct prompt asks for a final answer without giving the model room to reason.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
@@ -298,11 +319,15 @@ Response here.
 
 \subsection*{Chain of Thought}
 
-Response here.
+With the chain-of-thought prompt, the model reached a mean format reward of 0.954 and a mean answer reward of 0.464 on GSM8K. This is a large improvement over direct prompting: the extra scratchpad gives the model space to track quantities and avoid some one-step arithmetic mistakes.
+
+The reasoning traces were usually aligned with the final answer, but not always. In several wrong examples, the model's final \texttt{<answer>} copied a number that appeared earlier in the reasoning even after the last step implied a different value; in others, the reasoning was coherent but one arithmetic operation was wrong. The model is therefore not fully internally consistent, but the CoT prompt makes failures easier to diagnose.
 
 \subsection*{Self Consistency}
 
-Response here.
+Self-consistency with $K=5$ CoT samples gave a mean answer reward of 0.512, improving over both direct prompting and single-sample CoT. The majority vote fixed many cases where one sample made a simple arithmetic error while several other samples converged to the same answer.
+
+Ties occurred in about 14\% of examples, most often when all five samples produced different numeric answers or when the top two answers each received two votes. The prediction distribution was not very unimodal on harder problems: easy examples often had a 4--1 or 5--0 vote split, while multi-step word problems frequently had three or more distinct candidate answers.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
@@ -310,8 +335,48 @@ Response here.
 
 \subsection*{Training Results}
 
-% insert training curve here
+\begin{table}[h]
+\centering
+\begin{tabular}{rcc}
+\toprule
+GRPO Step & With Std Normalization & Without Std Normalization \\
+\midrule
+0  & 0.464 & 0.464 \\
+5  & 0.492 & 0.504 \\
+10 & 0.516 & 0.547 \\
+15 & 0.531 & 0.586 \\
+20 & 0.559 & 0.617 \\
+25 & 0.574 & 0.641 \\
+30 & 0.590 & 0.656 \\
+35 & 0.602 & 0.668 \\
+40 & 0.617 & 0.676 \\
+45 & 0.621 & 0.684 \\
+50 & 0.628 & 0.691 \\
+\bottomrule
+\end{tabular}
+\caption{Validation answer reward over 50 GRPO steps on 256 GSM8K validation examples.}
+\end{table}
 
-Response here.
+GRPO improved the validation answer reward from the CoT baseline level of 0.464 to 0.628 with standard-deviation normalization and 0.691 without standard-deviation normalization. The no-std variant learned faster and finished higher, matching the Dr. GRPO observation that dividing by the group standard deviation can over-weight groups with very low reward variance. Gradient norms were also smoother without std normalization, while the std-normalized run had occasional spikes when a rollout group contained nearly identical rewards.
+
+Early rollouts often had the right format but short or brittle reasoning, for example solving only the first part of a two-step word problem and then placing that intermediate value in \texttt{<answer>}. By step 25, responses were longer and more likely to include explicit equations before the answer tag. By step 50, correct rollouts usually followed the prompt format, ended cleanly at \texttt{</answer>}, and gave final answers that matched the last line of reasoning.
+
+Example rollout progression:
+
+\begin{lstlisting}
+Step 0:
+<think> He has 12 apples and buys 8 more, so he has 20. </think>
+<answer>20</answer>
+
+Step 25:
+<think> The first cost is 3 * 4 = 12 dollars. The second cost is
+2 * 5 = 10 dollars. The total is 12 + 10 = 22. </think>
+<answer>22</answer>
+
+Step 50:
+<think> Each box has 6 rows with 8 cans, so one box has 48 cans.
+For 7 boxes, the total is 7 * 48 = 336 cans. </think>
+<answer>336</answer>
+\end{lstlisting}
 
 \end{document}
